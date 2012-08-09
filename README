@@ -1,0 +1,12 @@
+kimono.py
+=========
+
+version:	0.1
+date:		9 août
+version python:	2.7.3
+dépend:		nltk, networkx, numpy, scipy, Pycluster, matplotlib
+auteur:		Louis Chartrand
+collaboration:	Jean-François Chartier, Maxime Sainte-Marie, Jean-Guy Meunier
+direction:	Jean-Guy Meunier
+
+Module python qui implémente des fonctions utilisée dans l'analyse conceptuelle de texte assistée par ordinateur. Développée dans le cadre d'un travail de recherche au LANCI (UQAM).
