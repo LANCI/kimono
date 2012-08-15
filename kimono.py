@@ -4,7 +4,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
-import re, sqlite3, nltk
+import re, sqlite3, nltk, subprocess
 from collections import Counter, deque
 import scipy.spatial.distance as sdist
 import Pycluster as pc
@@ -30,6 +30,21 @@ def human_time(t):
 	if ":" not in r: r=r+" secondes"
 	
 	return r
+
+def grepsearch(pattern, string):
+	# Plus rapide que regexp de Python, et prend probablement moins de mémoire.
+	p1=subprocess.Popen(["echo", string], stdout=subprocess.PIPE)
+	p2=subprocess.Popen(["grep", "-E",  pattern], stdin=p1.stdout, stdout=subprocess.PIPE)
+	p1.stdout.close()
+	return p2.communicate()[0]
+	
+
+def grepisin(pattern, string):
+	# Plus rapide que regexp de Python, et prend probablement moins de mémoire.
+	p1=subprocess.Popen(["echo", string], stdout=subprocess.PIPE)
+	p2=subprocess.Popen(["grep", "-E",  pattern], stdin=p1.stdout, stdout=subprocess.PIPE)
+	p1.stdout.close()
+	return p2.wait()==0
 
 def Burrows_delta(mat):
 	# Distance utilisée en stylométrie
@@ -234,17 +249,29 @@ class docDB:
 		# Ajouter les autres variables et envoyer la sauce
 		return self._ajouter_variables(mat)
 		
-	def concordance(self, mot, maxMots=5000, fenetre = 50, postStem = False):
+	def concordance(self, mot, maxMots=5000, fenetre = 50, postStem = False, regex=True):
 		# Fait une concordance et retourne une matrice
 		
 		# Chercher tous les articles dont le texte contiennent le mot
 		lscontextes=[]
-		mo=self.filtrer(mot)[0].encode("utf8")
+		if isinstance(mot,unicode):
+			mo=self.filtrer(mot)[0].encode("utf8")
+		else: mo=mot
 		
-		self.curs.execute("select Texte from articles where Texte like '%{0}%'".format(mo))
+		if regex:
+			regex=lambda x,y: grepregex(x,y) != ''
+			self.db.create_function("REGEXP", 2, regex)
+			#~ self.db.enable_load_extension(True)
+			#~ self.db.load_extension('/usr/lib/sqlite3/pcre.so')
+			vmatch = np.vectorize(lambda x: grepisin(mo, x))
+			self.curs.execute("select Texte from articles where Texte REGEXP '{0}'".format(mo))
+		else:
+			vmatch = np.vectorize(lambda x: x==mot)
+			self.curs.execute("select Texte from articles where Texte like '%{0}%'".format(mo))
+
 		for ln in self.curs.fetchall():
 			tl=np.array([ i.encode('utf8') for i in self._preTraitement(ln[0])])
-			for i in np.arange(len(tl))[tl==mo]:
+			for i in np.arange(len(tl))[vmatch(tl)]:
 				lb = i-fenetre if i>=fenetre else 0
 				ub = i+fenetre
 				lscontextes.append(tl[lb:ub])
@@ -268,6 +295,9 @@ class docDB:
 			mat.append(matln)
 		
 		wfm=WFMat(mat, self)
+		
+		#Ajouter la liste de mots
+		wfm.mots=motls[:]
 		
 		# Ajouter les autres variables et envoyer la sauce
 		return self._ajouter_variables(wfm)
@@ -368,12 +398,13 @@ class distance:
 		
 		return partition(c, self.mat)
 		
-class partition(list):
+class partition:
 	# Partition des documents
 	classes=[]
+	idf=None
 	
 	def __init__(self, clusterIDs, mat):
-		self[:]=list(clusterIDs)
+		self.codes=list(clusterIDs)
 		self.mat=mat
 		self.mkClasses()
 	
@@ -387,13 +418,13 @@ class partition(list):
 	
 	def mkClasses(self):
 		# Faire les classes à partir de la liste des numéros de classe pour chq document
-		l=range(len(self))
-		for i in np.unique(self):
-			self.classes.append(classe(l[self==i]))
+		l=np.arange(len(self.codes))
+		for i in np.unique(self.codes):
+			self.classes.append(classe(l[np.array(self.codes)==i],self))
 	
 	def calcIDF(self):
 		# Retourne l'IDF, considérant une classe comme un document
-		self.idf = np.log(len(self)/np.array([ c.freqs.clip(0,1) for c in self.classes ]).sum(0))
+		self.idf = np.log(len(self.codes)/np.array([ c.freqs.clip(0,1) for c in self.classes ]).sum(0))
 	
 	def calcTFIDF(self):
 		self.calcIDF()
@@ -409,25 +440,27 @@ class classe(list):
 		self.freqs=partition.mat.mat[docids].sum(0)
 	
 	def __str__(self):		
-		return pretty_print()
+		return self.prettyprint()
 			
-	def prettyprint(valeurs=None, n=5):
+	def prettyprint(self, valeurs=None, n=5):
 		# Retourne un coefficient d'association dans un format adapté à un terminal
 		if valeurs==None:
 			if self.tfidf==None:
 				self.calcTFIDF()
 			vals=self.tfidf
+		else: vals=valeurs
 		
-		ls=sorted(zip(vals,self.partition.mat.mots))[:5]
+		ls=sorted(zip(vals,self.partition.mat.mots), reverse=True)[:5]
 		r="Classe {0} (N={1})".format(ls[0][1], len(self))
-		hline="+" + "-" * len(r)+2 + "+"
-		r="%s\n| %s |\n%s" % (hline, r, hline)
+		hline="+" + "-" * (len(r)+2) + "+"
+		r="%s\n| %s |\n%s\n" % (hline, r, hline)
 		for val, mot in ls:
 			r+="\t{0}\t{1}\n".format(mot, val)
 		
 		return r
 	
 	def calcTFIDF(self):
+		if self.partition.idf==None: self.parition.calcIDF()
 		self.tfidf = self.freqs/float(self.freqs.sum())*self.partition.idf
 	
 	def signeAssociationChi2(self):
@@ -451,7 +484,7 @@ class classe(list):
 		nmat=(m*(-1))+1
 		
 		# Calcule la valeur absolue du coefficient χ²
-		G=numpy.zeros(len(self.partition))
+		G=numpy.zeros(len(self.partition.codes))
 		G[self]=1
 		nG=(G*(-1))+1
 		N=m.sum(0)
