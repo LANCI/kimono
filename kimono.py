@@ -2,7 +2,7 @@
 # -*- coding: UTF-8 -*-
 
 import numpy as np
-import matlplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import networkx as nx
 import re, sqlite3, nltk
 from collections import Counter, deque
@@ -12,7 +12,7 @@ from time import time
 
 def zscore_distr(d):
 	# Produit une distribution z-score ∈[0;1]
-	a=numpy.array(d)
+	a=np.array(d)
 	r=a-a.mean()
 	r=r/r.std()
 	return r
@@ -33,8 +33,7 @@ def human_time(t):
 
 def Burrows_delta(mat):
 	# Distance utilisée en stylométrie
-	# Cf. J. F. Burrows, “Delta: a measure of stylistic difference and a guide to likely authorship,” Literary and Linguistic Computing 17, pp. 267–287,
-2002a.
+	# Cf. J. F. Burrows, “Delta: a measure of stylistic difference and a guide to likely authorship,” Literary and Linguistic Computing 17, pp. 267–287, 2002.
 	# mat: matrice des fréquences de mot 
 	
 	if isinstance(mat,np.ndarray):
@@ -54,10 +53,10 @@ def Burrows_delta(mat):
 class docDB:
 	#Base de donnée des documents. Génère des matrices à partir de ça.
 	nonLetter=re.compile(u"[0-9:;,.’()[\]*&?%$#@!~|\\\/=+_¬}{¬¤¢£°±\n\r‘’“”«—·–»…¡¿̀`~^><'\"]")
-	tokenizer=nltk.tokenize.WordPunctTokenizer
+	tokenizer=nltk.tokenize.WordPunctTokenizer()
 	fdist=None
 	
-	def __init__(self, truc==None, table="", typ="", colTexte="Texte", colID="rowid", lang="french", stemmer=None, filterStopWords=False, filterDocHapax=False, stem=False, lettersOnly=True, lemmatize=False):
+	def __init__(self, truc, table, typ="", colTexte="Texte", colID="rowid", lang="french", stemmer=None, filterStopWords=False, filterDocHapax=False, stem=False, lettersOnly=True, lemmatize=False, maxOccur=0.4, minOccur=0.03):
 		#On peut initialiser à partir de données d'une db sqlite. Davantage à venir.
 		
 		if isinstance(truc, sqlite3.Connection) and table != "":
@@ -71,12 +70,13 @@ class docDB:
 			self.table=table
 		
 		else:
-			self.db=sqlite3.connect(":memory")
+			self.db=sqlite3.connect(":memory:")
 			self.table="documents"
 		
 		self.curs=self.db.cursor()
 		self.curs.execute("pragma table_info(%s)" % self.table)
 		self.cols=[ i[1] for i in self.curs.fetchall() ]
+		
 		self.colTexte=colTexte
 		self.colID=colID
 		self.lang=lang
@@ -86,10 +86,80 @@ class docDB:
 		self.lettersOnly=lettersOnly
 		self.lemmatize=lemmatize
 		self.filterDocHapax=filterDocHapax
+		self.maxOccur=maxOccur
+		self.minOccur=minOccur
 		
 		if stemmer==None:
 			self.stemmer=nltk.stem.SnowballStemmer(lang)
 		else: self.stemmer=stemmer
+	
+	def _ajouter_variables(self, mat):
+		# Ajouter les autres variables
+		lsvals=list(set(self.cols[:]+[self.colID]))
+		lsvals.remove(self.colTexte)
+		
+		self.curs.execute("select {0} from {1}".format(", ".join(lsvals), self.table))
+		vars(mat).update(dict(zip(lsvals,np.array(self.curs.fetchall()).T)))
+		
+		return mat
+	
+	def _preTraitement(self, t, filtrerDocHapax=None):
+		# Tokenize et filtre un texte t, retourne liste de mots
+		# Fait pour être lancé avant une concordance
+		# Filtres: miniscule, enlever les non-lettres, stopwords
+		
+		if isinstance(t,list) or isinstance(t, np.ndarray) or isinstance(t, deque):
+			r=" ".join(list(t))
+		else: r=t
+		
+		# Mettre en minuscule
+		r=r.lower()
+		
+		# Filtres
+		if self.lettersOnly:
+			r=re.sub(self.nonLetter,"",r)
+		if self.filterStopWords:
+			swre=" *\\b("+"|".join(nltk.corpus.stopwords.words(self.lang))+")\\b *"
+			r=re.sub(swre," ", r)
+			
+		return self.tokenizer.tokenize(r)
+	
+	def _postTraitement(self, listeMots):
+		# Filtre une liste de mots
+		# Fait pour être lancé après une concordance
+		# Filtres: mots trop ou trop peu fréquents
+		
+		l=listeMots[:]
+		
+		#Stem
+		if self.stem:
+			l = [ [ self.stemmer.stem(mot) for mot in ln ] for ln in l ]
+		
+		# Lemmatize
+		#English-only (wordnet)
+		if self.lemmatize:
+			lem=nltk.wordnet.WordNetLemmatizer()
+			l = [ [ lem.lemmatize(mot) for mot in ln ] for ln in l ]
+		
+		# Filtrer selon fréquence
+		
+		# faire la fréquence des mots
+		import itertools
+		wf=Counter(list(itertools.chain(*l)))
+		
+		# calculer occurrence maximum et minimum
+		if isinstance(self.maxOccur,float) and self.maxOccur<=1.0:
+			maxo=self.maxOccur*len(l)
+		else: maxo = int(self.maxOccur)
+		
+		if isinstance(self.minOccur,float) and self.minOccur>=0.0:
+			mino=int(np.ceil(self.minOccur*len(l)))
+		else: mino = self.minOccur
+		
+		# Do it
+		l=[ [ i for i in ln if wf[i]>=mino and wf[i]<=maxo ] for ln in l ]
+		
+		return l, wf.keys()
 	
 	def filtrer(self, t, typ="list", filtrerDocHapax=None):
 		# Tokenize et filtre un texte t, retourne liste de mots (sauf si typ=="str")
@@ -120,7 +190,7 @@ class docDB:
 		# Retour
 		if typ=="str":
 			return " ".join(tl)
-		elif typ="list":
+		elif typ=="list":
 			return tl
 		else: return tl
 	
@@ -132,36 +202,75 @@ class docDB:
 			for i in self.filtrer(ln[0]):
 				self.fdist.inc(i.lower())
 	
-	def MakeWFMat(self, hapax=False):
+	def MakeWFMat(self, hapax=False, maxMots=5000):
 		# Faire la matrice — pour les opérations mathématiques
 		
-		if hapax and fdist==None:
-			self.MakeFDist()
+		self.MakeFDist()
 		
 		# Liste de mots
-		motls=self.fdist.samples()
-		lszero=dict(zip(motls, np.zeros( len(motls), dtype=int))) # pour entre freqs sans perdre l'ordre des mots
+		motls=[ i.encode('utf8') for i in self.fdist.keys()[:maxMots] ]
+		motids=np.array(tuple(range(len(motls))), dtype=zip(motls, ["<i4"]*len(motls)))
 		
 		# Rappel des textes de la DB sqlite
-		self.curs.execute("select {0} from {1}".format(sel.colTexte, self.table) )
+		self.curs.execute("select {0} from {1}".format(self.colTexte, self.table) )
 		mat=deque()
 		
 		# Faire la matrice elle-même
 		for ln in self.curs.fetchall():
-			l=lszero.copy()
-			l.update(Counter(self.filtrer(ln[0])))
-			mat.append(l.values())
+			matln=np.zeros(len(motls),dtype="<i4")
+			
+			wfcounter=Counter(self.filtrer(ln[0]))  # Compte occurrence de chaque mot
+			wfkeys=[i.encode('utf8') for i in wfcounter.keys()]
+			wfarray=np.array(tuple(wfcounter.values()), dtype=zip(wfkeys, ["<i4"]*len(wfcounter)))
+			motscommuns=list(set(wfkeys) & set(motls)) # Ne prend que les mots qui sont dans le top 5000 (maxMots) pour le corpus
+			matln[list(motids[motscommuns])]=list(wfarray[motscommuns]) # Ajoute les valeurs
+			
+			mat.append(matln)
 		mat=WFMat(mat)
 		
 		#Ajouter la liste de mots
 		mat.mots=motls[:]
 		
-		# Ajouter les autres variables
-		lsvals=list(set(self.cols[:]+self.colID))
-		ls.vals.remove(self.colTexte)
+		# Ajouter les autres variables et envoyer la sauce
+		return self._ajouter_variables(mat)
 		
-		self.curs.execute("select {0} from {1}".format(", ".join(lsvals), self.table))
-		vars(mat).update(dict(zip(lsvals,np.array(self.curs.fetchall()).T)))
+	def concordance(self, mot, maxMots=5000, fenetre = 50, postStem = False):
+		# Fait une concordance et retourne une matrice
+		
+		# Chercher tous les articles dont le texte contiennent le mot
+		lscontextes=[]
+		mo=self.filtrer(mot)[0].encode("utf8")
+		
+		self.curs.execute("select Texte from articles where Texte like '%{0}%'".format(mo))
+		for ln in self.curs.fetchall():
+			tl=np.array([ i.encode('utf8') for i in self._preTraitement(ln[0])])
+			for i in np.arange(len(tl))[tl==mo]:
+				lb = i-fenetre if i>=fenetre else 0
+				ub = i+fenetre
+				lscontextes.append(tl[lb:ub])
+		
+		# Faire fréquence de mot globale
+		lscontextes, motls=self._postTraitement(lscontextes)
+		motids=np.array(tuple(range(len(motls))), dtype=zip(motls, ["<i4"]*len(motls)))
+		
+		# Faire la matrice elle-même
+		mat=deque()
+		
+		for ln in lscontextes:
+			matln=np.zeros(len(motls),dtype="<i4")
+			
+			wfcounter=Counter(ln)  # Compte occurrence de chaque mot
+			wfkeys=wfcounter.keys()
+			wfarray=np.array(tuple(wfcounter.values()), dtype=zip(wfkeys, ["<i4"]*len(wfcounter)))
+			motscommuns=list(set(wfkeys) & set(motls)) # Ne prend que les mots qui sont dans le top 5000 (maxMots) pour le corpus
+			matln[list(motids[motscommuns])]=list(wfarray[motscommuns]) # Ajoute les valeurs
+			
+			mat.append(matln)
+		
+		wfm=WFMat(mat, self)
+		
+		# Ajouter les autres variables et envoyer la sauce
+		return self._ajouter_variables(wfm)
 
 class WFMat:
 	# Matrice de fréquence de mots
@@ -172,23 +281,24 @@ class WFMat:
 			
 	def distance(self, metric="jaccard"):
 		# Produit une matrice de distance entre documents
-		if dist=="burrows":
+		if metric=="burrows":
 			return distance(Burrows_delta(self.mat), mat=self)
 		else:
-			return distance(sdist.squareform(sdist.pdist(self.mat,metric=metric), mat=self)
+			return distance(sdist.squareform(sdist.pdist(self.mat,metric=metric)), mat=self)
 	
-	def multikmeans(self, krange=None ):
+	def multikmeans(self, krange=None):
 		# La recette magique
 		
 		if krange==None:
-			kr=np.arange(2, len(mat)-1)
+			kr=np.arange(2, len(self.mat)-1)
 		else: kr=krange
 		lmat=len(self.mat)
 		
 		accords=np.zeros((lmat,lmat), dtype=int) # Où on comptera combien de fois chq paire de documents est classé ensemble
 		t=deque() # pour sauver temps & mémoire, on emploie deque à la place de list
 		t0=time()
-		tunits=(kr**2).sum() # La durée d'une itération serait proportionnelle à k², grosso modo et en théorie
+		k2s = lambda x: x*0.85
+		tunits=k2s(np.array(kr)).sum()
 		
 		# La boucle elle-même
 		for k in kr:
@@ -203,21 +313,22 @@ class WFMat:
 			
 			# Prédiction du temps restant
 			t2=time()
-			tunits-=k**2
-			t.append((t2-t1)/k**2)
-			prediction = tunits*np.mean(t[-20:])
-			print "k={0}: \t{1} ({2} depuis le début) \t{3} à faire".format(human_time(t2-t1),human_time(t2-t0),human_time(prediction))
+			tunits-=k2s(k)
+			t.append((t2-t1)/k2s(k))
+			prediction = tunits*np.mean(tuple(t)[-20:])
+			print "k={0}: \t{1} ({2} depuis le début) \t{3} à faire".format(k,human_time(t2-t1),human_time(t2-t0),human_time(prediction))
 		
 		return accords/float(k)
 
 class distance:
 	# Matrice de distance entre documents
 	graph=None
+	pos=None
 	
 	def __init__(self, distmat, mat=None):
 		self.d=np.array(distmat)
 		self.zd=zscore_distr(self.d)
-		self.mat==mat
+		self.mat=mat
 	
 	def mkGraph(self):
 		# fait un graphe NetworkX à partir des distances. Surtout pour les projections Fruchteman-Reingold
@@ -226,17 +337,23 @@ class distance:
 			for j in xrange(i, len(self.zd)):
 				self.graph.add_edge(i,j,weight=1-self.zd[i][j])
 	
-	def projFruchtemanReingold(self, partition=None, sortie=None):
+	def projFruchtemanReingold(self, partition=None, sortie=None, positions=None):
 		# Projette sur 2 dimensions grâces à un algorithme de force
-		plt.clf()
-		pos=nx.spring_layout(self.zd, weighted=True)
 		
-		dval={"with_labels": False, "node_size":10}
+		if self.graph==None: self.mkGraph()
+		
+		plt.clf()
+		if positions!=None:
+			self.pos=positions
+		elif self.pos==None:	
+			self.pos=nx.spring_layout(self.graph, weighted=True)
+		
+		dvals={"with_labels": False, "node_size":10}
 		if partition!=None:
 			dvals["node_color"]=partition[:]
 			dvals["vmin"]=min(partition)
 			dvals["vmax"]=max(partition)
-		nx.draw_networkx_nodes(self.d, self.pos, **dvals)
+		nx.draw_networkx_nodes(self.graph, self.pos, **dvals)
 		
 		if sortie==None:
 			plt.show()
@@ -295,6 +412,7 @@ class classe(list):
 		return pretty_print()
 			
 	def prettyprint(valeurs=None, n=5):
+		# Retourne un coefficient d'association dans un format adapté à un terminal
 		if valeurs==None:
 			if self.tfidf==None:
 				self.calcTFIDF()
@@ -302,14 +420,14 @@ class classe(list):
 		
 		ls=sorted(zip(vals,self.partition.mat.mots))[:5]
 		r="Classe {0} (N={1})".format(ls[0][1], len(self))
-		hline="+" + "-" * len(r)+2 +"+
+		hline="+" + "-" * len(r)+2 + "+"
 		r="%s\n| %s |\n%s" % (hline, r, hline)
 		for val, mot in ls:
 			r+="\t{0}\t{1}\n".format(mot, val)
 		
 		return r
 	
-	def calcTFIDF(self)
+	def calcTFIDF(self):
 		self.tfidf = self.freqs/float(self.freqs.sum())*self.partition.idf
 	
 	def signeAssociationChi2(self):
@@ -321,16 +439,18 @@ class classe(list):
 		return (O<E)*2 - 1
 	
 	def motsChi2(self):
+		# Donne une liste de mots avec les mots sous-représentés entre parenthèse
 		l=np.array(self.partition.mat.mots)
 		sousreps=self.signeAssociationChi2()
 		l[sousreps==-1]=["(%s)" % i for i in l[sousreps==-1]]
 		return l
 		
 	def calcChi2(self):
+		# Calcule le coefficient d'association χ² pour tous les mots
 		m=self.partition.mat.mat
 		nmat=(m*(-1))+1
 		
-		# Calcule la valeur absolue du tfidf
+		# Calcule la valeur absolue du coefficient χ²
 		G=numpy.zeros(len(self.partition))
 		G[self]=1
 		nG=(G*(-1))+1
